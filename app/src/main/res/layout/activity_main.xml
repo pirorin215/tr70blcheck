@@ -16,43 +16,57 @@
         android:textSize="24sp"
         android:textStyle="bold"
         android:gravity="center"
-        android:layout_marginBottom="16dp" />
+        android:layout_marginBottom="8dp" />
+
+    <Button
+        android:id="@+id/btn_rescan"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="🔄 再スキャン"
+        android:layout_marginBottom="8dp" />
 
     <TextView
         android:id="@+id/tv_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="状態: 起動中..."
-        android:textSize="18sp"
-        android:layout_marginBottom="16dp" />
+        android:textSize="16sp"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/tv_section_devices"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="デバイス一覧"
+        android:textSize="14sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp" />
+
+    <!-- デバイスカードを動的に追加するコンテナ -->
+    <LinearLayout
+        android:id="@+id/device_card_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/tv_no_devices"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="まだスキャンしていません"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:padding="16dp"
+        android:layout_marginBottom="12dp" />
 
     <TextView
         android:id="@+id/tv_device_info"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="デバイス情報: --"
-        android:textSize="14sp"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
-        android:id="@+id/tv_battery"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="デバイスリスト:"
-        android:textSize="16sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="8dp" />
-
-    <TextView
-        android:id="@+id/tv_device_list"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="まだスキャンしていません"
-        android:textSize="14sp"
-        android:layout_marginBottom="8dp"
-        android:padding="8dp"
-        android:background="@android:color/white"
-        android:textColor="@android:color/black" />
+        android:textSize="12sp"
+        android:layout_marginBottom="4dp" />
 
     <TextView
         android:id="@+id/tv_services"

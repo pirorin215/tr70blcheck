@@ -6,10 +6,17 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pirorin215.tr70batterymonitor.data.BleEvent
 import com.pirorin215.tr70batterymonitor.data.BleRepository
 import com.pirorin215.tr70batterymonitor.data.ConnectionState
 import com.pirorin215.tr70batterymonitor.data.DeviceBatteryInfo
+import com.pirorin215.tr70batterymonitor.data.DeviceStatus
 import com.pirorin215.tr70batterymonitor.service.BleScanServiceManager
+import com.pirorin215.tr70batterymonitor.service.ScannedDevice
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -23,6 +30,9 @@ class MainViewModel : ViewModel() {
 
         // ターゲットデバイス名
         private val TARGET_DEVICES = listOf("TR70", "BSC200S")
+
+        // デバイスごとのタイムアウト（ミリ秒）
+        private const val DEVICE_TIMEOUT_MS = 15000L
     }
 
     private lateinit var repository: BleRepository
@@ -30,6 +40,8 @@ class MainViewModel : ViewModel() {
     private val deviceBatteryMap = ConcurrentHashMap<String, DeviceBatteryInfo>()
     private val pendingDevices = mutableListOf<BluetoothDevice>()
     private var isProcessing = false
+    private var currentProcessingAddress: String? = null
+    private var timeoutJob: Job? = null
 
     // UI States
     private val _connectionState = MutableStateFlow("Disconnected")
@@ -66,22 +78,40 @@ class MainViewModel : ViewModel() {
                     is ConnectionState.Disconnected -> {
                         _connectionState.value = "Disconnected"
                         appendLog("切断されました")
+                        cancelTimeout()
+                        // バッテリー未取得ならエラーステータスに
+                        val address = currentProcessingAddress
+                        if (address != null) {
+                            val info = deviceBatteryMap[address]
+                            if (info != null && info.batteryLevel == null) {
+                                updateDeviceStatus(address, DeviceStatus.ERROR)
+                            }
+                        }
                         isProcessing = false
+                        currentProcessingAddress = null
                         processNextDevice()
                     }
                     is ConnectionState.Connecting -> {
                         _connectionState.value = "Connecting"
                         appendLog("接続中...")
+                        updateDeviceStatus(currentProcessingAddress, DeviceStatus.CONNECTING)
                     }
                     is ConnectionState.Connected -> {
                         _connectionState.value = "Connected"
                         _deviceInfo.value = "デバイス: ${state.device.name} (${state.device.address})"
                         appendLog("接続成功: ${state.device.name}")
+                        updateDeviceStatus(state.device.address, DeviceStatus.CONNECTED)
+
+                        // タイムアウト開始
+                        startDeviceTimeout(state.device.address)
                     }
                     is ConnectionState.Error -> {
                         _connectionState.value = "Error"
                         appendLog("エラー: ${state.message}")
+                        cancelTimeout()
+                        updateDeviceStatus(currentProcessingAddress, DeviceStatus.ERROR)
                         isProcessing = false
+                        currentProcessingAddress = null
                         processNextDevice()
                     }
                 }
@@ -103,11 +133,13 @@ class MainViewModel : ViewModel() {
                     appendLog("バッテリー: $level%")
 
                     // 現在接続中のデバイスのバッテリーを更新
-                    val currentDeviceAddress = getCurrentDeviceAddress()
-                    if (currentDeviceAddress != null) {
-                        val deviceInfo = deviceBatteryMap[currentDeviceAddress]
+                    val address = currentProcessingAddress
+                    if (address != null) {
+                        cancelTimeout()
+                        updateDeviceStatus(address, DeviceStatus.READING)
+                        val deviceInfo = deviceBatteryMap[address]
                         if (deviceInfo != null) {
-                            deviceBatteryMap[currentDeviceAddress] = deviceInfo.copy(
+                            deviceBatteryMap[address] = deviceInfo.copy(
                                 batteryLevel = level,
                                 lastUpdate = System.currentTimeMillis()
                             )
@@ -134,43 +166,74 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             repository.events.collect { event ->
                 when (event) {
-                    is com.pirorin215.tr70batterymonitor.data.BleEvent.ServicesDiscovered -> {
+                    is BleEvent.ServicesDiscovered -> {
                         appendLog("Service発見完了")
                         event.services.forEach { appendLog("  $it") }
                     }
-                    is com.pirorin215.tr70batterymonitor.data.BleEvent.BatteryLevelChanged -> {
+                    is BleEvent.BatteryLevelChanged -> {
                         appendLog("バッテリー更新: ${event.level}%")
                     }
-                    is com.pirorin215.tr70batterymonitor.data.BleEvent.CharacteristicRead -> {
+                    is BleEvent.CharacteristicRead -> {
                         appendLog("Characteristic読取: ${event.uuid} = ${event.value}")
                     }
-                    is com.pirorin215.tr70batterymonitor.data.BleEvent.Ready -> {
+                    is BleEvent.RssiUpdated -> {
+                        appendLog("RSSI更新: ${event.rssi} dBm")
+                        val address = currentProcessingAddress
+                        if (address != null) {
+                            updateDeviceRssi(address, event.rssi)
+                        }
+                    }
+                    is BleEvent.Ready -> {
                         appendLog("デバイス準備完了")
                     }
-                    is com.pirorin215.tr70batterymonitor.data.BleEvent.Error -> {
+                    is BleEvent.Error -> {
                         appendLog("エラー: ${event.message}")
                     }
                 }
             }
         }
 
-        // Listen for devices found by the background scanning service
+        // Listen for scanned devices (with RSSI) from the background scanning service
         viewModelScope.launch {
-            BleScanServiceManager.deviceFoundFlow.collect { device ->
-                onDeviceFound(device)
+            BleScanServiceManager.deviceFoundFlow.collect { scannedDevice ->
+                onScannedDeviceFound(scannedDevice)
             }
         }
     }
 
-    private fun getCurrentDeviceAddress(): String? {
-        val state = _connectionState.value
-        if (state == "Connected") {
-            return _deviceInfo.value.let { info ->
-                val regex = Regex("\\(([0-9A-F:]+)\\)")
-                regex.find(info)?.groupValues?.get(1)
-            }
+    /**
+     * デバイスごとのタイムアウト開始
+     */
+    private fun startDeviceTimeout(address: String) {
+        cancelTimeout()
+        timeoutJob = CoroutineScope(Dispatchers.Main).launch {
+            delay(DEVICE_TIMEOUT_MS)
+            appendLog("タイムアウト: ${deviceBatteryMap[address]?.deviceName ?: address}")
+            updateDeviceStatus(address, DeviceStatus.ERROR)
+            repository.disconnect()
         }
-        return null
+    }
+
+    private fun cancelTimeout() {
+        timeoutJob?.cancel()
+        timeoutJob = null
+    }
+
+    private fun updateDeviceStatus(address: String?, status: DeviceStatus) {
+        if (address == null) return
+        val deviceInfo = deviceBatteryMap[address]
+        if (deviceInfo != null) {
+            deviceBatteryMap[address] = deviceInfo.copy(status = status)
+            _deviceList.value = deviceBatteryMap.values.toList()
+        }
+    }
+
+    private fun updateDeviceRssi(address: String, rssi: Int) {
+        val deviceInfo = deviceBatteryMap[address]
+        if (deviceInfo != null) {
+            deviceBatteryMap[address] = deviceInfo.copy(rssi = rssi)
+            _deviceList.value = deviceBatteryMap.values.toList()
+        }
     }
 
     fun onPermissionsGranted() {
@@ -179,11 +242,17 @@ class MainViewModel : ViewModel() {
 
     fun startScan() {
         appendLog("スキャン開始...")
+
+        // 既存のGATT接続を切断
+        repository.disconnect()
+        cancelTimeout()
+        isProcessing = false
+        currentProcessingAddress = null
+
         _connectionState.value = "Scanning"
         _deviceList.value = emptyList()
         deviceBatteryMap.clear()
         pendingDevices.clear()
-        isProcessing = false
 
         // まずBondedDevice（ペアリング済みデバイス）を確認
         checkBondedDevices()
@@ -211,12 +280,17 @@ class MainViewModel : ViewModel() {
             val isTargetDevice = TARGET_DEVICES.any { deviceName.contains(it, ignoreCase = true) }
             if (isTargetDevice) {
                 appendLog("  → ターゲットデバイス発見: $deviceName")
-                onDeviceFound(device)
+                addDeviceToQueue(device, deviceName, rssi = null)
             }
         }
     }
 
-    fun onDeviceFound(device: BluetoothDevice) {
+    /**
+     * BLEスキャンからのデバイス発見（RSSI付き）
+     */
+    private fun onScannedDeviceFound(scannedDevice: ScannedDevice) {
+        val device = scannedDevice.device
+        val rssi = scannedDevice.rssi
         val deviceName = device.name ?: "(no name)"
 
         // ターゲットデバイスかチェック
@@ -225,20 +299,41 @@ class MainViewModel : ViewModel() {
             return
         }
 
-        appendLog("ターゲットデバイス発見: $deviceName")
+        appendLog("ターゲットデバイス発見(スキャン): $deviceName (RSSI: $rssi)")
+        addDeviceToQueue(device, deviceName, rssi)
+    }
 
-        // バッテリー取得済みの場合はスキップ
-        val existingInfo = deviceBatteryMap[device.address]
-        if (existingInfo != null && existingInfo.batteryLevel != null) {
-            appendLog("  → バッテリー取得済み: $deviceName (${existingInfo.batteryLevel}%)")
+    /**
+     * デバイスを処理キューに追加
+     */
+    private fun addDeviceToQueue(device: BluetoothDevice, deviceName: String, rssi: Int?) {
+        val address = device.address
+
+        // 既存のエントリがある場合
+        val existingInfo = deviceBatteryMap[address]
+        if (existingInfo != null) {
+            // RSSI更新（スキャンから再検出された場合など）
+            if (rssi != null) {
+                deviceBatteryMap[address] = existingInfo.copy(rssi = rssi)
+                _deviceList.value = deviceBatteryMap.values.toList()
+            }
+            // バッテリー取得済みの場合はスキップ
+            if (existingInfo.batteryLevel != null) {
+                appendLog("  → バッテリー取得済み: $deviceName (${existingInfo.batteryLevel}%)")
+                return
+            }
             return
         }
 
+        appendLog("ターゲットデバイス発見: $deviceName")
+
         // 初期情報を登録
-        deviceBatteryMap[device.address] = DeviceBatteryInfo(
-            deviceAddress = device.address,
+        deviceBatteryMap[address] = DeviceBatteryInfo(
+            deviceAddress = address,
             deviceName = deviceName,
-            batteryLevel = null
+            batteryLevel = null,
+            rssi = rssi,
+            status = DeviceStatus.FOUND
         )
         _deviceList.value = deviceBatteryMap.values.toList()
 
@@ -252,6 +347,21 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    /**
+     * BluetoothDeviceのみ（ペアリング済みデバイス用、RSSIなし）
+     */
+    fun onDeviceFound(device: BluetoothDevice) {
+        val deviceName = device.name ?: "(no name)"
+
+        // ターゲットデバイスかチェック
+        val isTargetDevice = TARGET_DEVICES.any { deviceName.contains(it, ignoreCase = true) }
+        if (!isTargetDevice) {
+            return
+        }
+
+        addDeviceToQueue(device, deviceName, rssi = null)
+    }
+
     private fun processNextDevice() {
         if (isProcessing || pendingDevices.isEmpty()) {
             if (pendingDevices.isEmpty() && deviceBatteryMap.isNotEmpty()) {
@@ -263,6 +373,7 @@ class MainViewModel : ViewModel() {
 
         isProcessing = true
         val nextDevice = pendingDevices.removeAt(0)
+        currentProcessingAddress = nextDevice.address
         appendLog("次のデバイスを処理: ${nextDevice.name} (残り: ${pendingDevices.size}台)")
 
         // デバイスに接続
@@ -270,12 +381,12 @@ class MainViewModel : ViewModel() {
     }
 
     fun connectToDevice() {
-        // このメソッドは使用しない（自動処理）
         appendLog("自動処理中です。お待ちください...")
     }
 
     fun disconnect() {
         appendLog("全デバイス切断リクエスト...")
+        cancelTimeout()
         repository.disconnect()
         deviceBatteryMap.clear()
         pendingDevices.clear()
@@ -298,6 +409,7 @@ class MainViewModel : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        cancelTimeout()
         repository.close()
     }
 }

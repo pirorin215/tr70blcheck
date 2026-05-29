@@ -157,7 +157,7 @@ class BleScanService : Service() {
                 Log.d(TAG, "Target device found: $deviceName")
                 // スキャンを継続して複数デバイスを見つける
                 CoroutineScope(Dispatchers.IO).launch {
-                    BleScanServiceManager.emitDeviceFound(result.device)
+                    BleScanServiceManager.emitDeviceFound(result.device, result.rssi)
                 }
             }
         }

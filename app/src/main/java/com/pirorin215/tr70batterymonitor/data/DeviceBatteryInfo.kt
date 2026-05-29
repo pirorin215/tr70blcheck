@@ -4,6 +4,8 @@ data class DeviceBatteryInfo(
     val deviceAddress: String,
     val deviceName: String,
     val batteryLevel: Int?,
+    val rssi: Int? = null,
+    val status: DeviceStatus = DeviceStatus.SCANNING,
     val lastUpdate: Long = System.currentTimeMillis()
 ) {
     companion object {
@@ -17,4 +19,34 @@ data class DeviceBatteryInfo(
             "--"
         }
     }
+
+    fun getRssiDisplay(): String {
+        return if (rssi != null) {
+            "${rssi}dBm"
+        } else {
+            "--"
+        }
+    }
+
+    fun getStatusDisplay(): String {
+        return when (status) {
+            DeviceStatus.SCANNING -> "スキャン中"
+            DeviceStatus.FOUND -> "発見"
+            DeviceStatus.CONNECTING -> "接続中"
+            DeviceStatus.CONNECTED -> "接続済み"
+            DeviceStatus.READING -> "読取中"
+            DeviceStatus.COMPLETED -> "取得済み"
+            DeviceStatus.ERROR -> "エラー"
+        }
+    }
+}
+
+enum class DeviceStatus {
+    SCANNING,
+    FOUND,
+    CONNECTING,
+    CONNECTED,
+    READING,
+    COMPLETED,
+    ERROR
 }
