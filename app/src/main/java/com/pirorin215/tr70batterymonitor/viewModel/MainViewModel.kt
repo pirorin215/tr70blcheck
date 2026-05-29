@@ -79,6 +79,9 @@ class MainViewModel : ViewModel() {
         
         startScanCheck()
         checkBondedDevices()
+
+        // デフォルトデバイス枠を作成（まだデバイスがない場合）
+        createDefaultDeviceFrames()
     }
 
     private fun handleBleEvent(event: BleEvent) {
@@ -146,6 +149,9 @@ class MainViewModel : ViewModel() {
 
         if (!TARGET_DEVICES.any { deviceName.contains(it, ignoreCase = true) }) return
 
+        // 実際のデバイスが見つかった場合、デフォルト枠を削除
+        removeDefaultFrameIfNeeded(deviceName)
+
         val existing = deviceBatteryMap[address]
         if (existing == null) {
             appendLog("ターゲットデバイス初発見: $deviceName ($address)")
@@ -170,6 +176,24 @@ class MainViewModel : ViewModel() {
             if (existing.status == DeviceStatus.DISCONNECTED || existing.status == DeviceStatus.ERROR) {
                 repository.connect(device)
                 updateDeviceInfo(address) { it.copy(status = DeviceStatus.CONNECTING) }
+            }
+        }
+    }
+
+    /**
+     * デバイス名に基づいてデフォルト枠を削除
+     */
+    private fun removeDefaultFrameIfNeeded(deviceName: String) {
+        when {
+            deviceName.contains("TR70", ignoreCase = true) -> {
+                deviceBatteryMap.remove("TR70_DEFAULT")?.let {
+                    appendLog("デフォルト枠削除: TR70")
+                }
+            }
+            deviceName.contains("BSC200S", ignoreCase = true) -> {
+                deviceBatteryMap.remove("BSC200S_DEFAULT")?.let {
+                    appendLog("デフォルト枠削除: BSC200S")
+                }
             }
         }
     }
@@ -369,6 +393,45 @@ class MainViewModel : ViewModel() {
         super.onCleared()
         scanCheckJob?.cancel()
         deviceTimeoutJobs.values.forEach { it.cancel() }
+    }
+
+    /**
+     * デフォルトデバイス枠を作成（まだデバイスがない場合）
+     * アプリ起動時に常にTR70とBSC200Sの枠を表示するため
+     */
+    private fun createDefaultDeviceFrames() {
+        val hasTR70 = deviceBatteryMap.values.any { it.deviceName.contains("TR70", ignoreCase = true) }
+        val hasBSC200S = deviceBatteryMap.values.any { it.deviceName.contains("BSC200S", ignoreCase = true) }
+
+        if (!hasTR70) {
+            val tr70Frame = DeviceBatteryInfo(
+                deviceAddress = "TR70_DEFAULT",
+                deviceName = "TR70",
+                batteryLevel = null,
+                rssi = null,
+                status = DeviceStatus.SCANNING,
+                lastUpdate = System.currentTimeMillis(),
+                lastDetectedTime = System.currentTimeMillis()
+            )
+            deviceBatteryMap["TR70_DEFAULT"] = tr70Frame
+            appendLog("デフォルト枠作成: TR70")
+        }
+
+        if (!hasBSC200S) {
+            val bsc200sFrame = DeviceBatteryInfo(
+                deviceAddress = "BSC200S_DEFAULT",
+                deviceName = "BSC200S",
+                batteryLevel = null,
+                rssi = null,
+                status = DeviceStatus.SCANNING,
+                lastUpdate = System.currentTimeMillis(),
+                lastDetectedTime = System.currentTimeMillis()
+            )
+            deviceBatteryMap["BSC200S_DEFAULT"] = bsc200sFrame
+            appendLog("デフォルト枠作成: BSC200S")
+        }
+
+        _deviceList.value = deviceBatteryMap.values.toList()
     }
 
     fun onPermissionsGranted() {}
