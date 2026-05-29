@@ -39,6 +39,10 @@ class BleScanService : Service() {
     private var scanJob: Job? = null
     private var isScanningActive = false
 
+    // デバイスごとの最終ログ出力時間を追跡（ログ出力頻度制限用）
+    private val lastLogTimeMap = mutableMapOf<String, Long>()
+    private val LOG_INTERVAL_MS = 5000L // 同一デバイスのログ出力間隔（5秒）
+
     private val scanSettings = ScanSettings.Builder()
         .setScanMode(ScanSettings.SCAN_MODE_BALANCED)
         .setCallbackType(ScanSettings.CALLBACK_TYPE_ALL_MATCHES)
@@ -134,7 +138,17 @@ class BleScanService : Service() {
                 deviceName.contains("TR70", ignoreCase = true) ||
                 deviceName.contains("RTL510", ignoreCase = true) ||
                 deviceName.contains("RTR510", ignoreCase = true)) {
-                Log.d(TAG, "Target device found: $deviceName (${result.device.address}), RSSI: ${result.rssi}")
+
+                val deviceAddress = result.device.address
+                val currentTime = System.currentTimeMillis()
+                val lastLogTime = lastLogTimeMap[deviceAddress] ?: 0L
+
+                // 初回検出または一定期間経過過の場合のみログ出力
+                if (currentTime - lastLogTime > LOG_INTERVAL_MS) {
+                    Log.d(TAG, "Target device found: $deviceName ($deviceAddress), RSSI: ${result.rssi}")
+                    lastLogTimeMap[deviceAddress] = currentTime
+                }
+
                 CoroutineScope(Dispatchers.IO).launch {
                     BleScanServiceManager.emitDeviceFound(result.device, result.rssi)
                 }
