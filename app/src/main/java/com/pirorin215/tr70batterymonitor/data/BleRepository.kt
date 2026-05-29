@@ -60,9 +60,9 @@ class BleRepository(private val context: Context) {
     private var isBsc200s = false
     private var mtuNegotiated = false
 
-    // NUS characteristics
+    // iGPSPORT characteristics
+    private val txCharacteristics = mutableMapOf<String, BluetoothGattCharacteristic>()
     private var nusRxCharacteristic: BluetoothGattCharacteristic? = null
-    private var nusTxCharacteristic: BluetoothGattCharacteristic? = null
 
     // State flows
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
@@ -212,9 +212,13 @@ class BleRepository(private val context: Context) {
             }
 
             // BSC200S NUS notification
-            if (uuid.equals(NUS_TX_UUID, ignoreCase = true)) {
-                addLog("NUS notification received (${value.size} bytes)")
-                parseBsc200sBatteryResponse(value)
+            if (uuid.contains("6e400003", ignoreCase = true)) {
+                val suffix = uuid.substring(uuid.length - 5)
+                addLog("iGPSPORT notification received from $suffix (${value.size} bytes)")
+                
+                if (uuid.equals(NUS_TX_UUID, ignoreCase = true)) {
+                    parseBsc200sBatteryResponse(value)
+                }
             }
         }
 
@@ -261,8 +265,8 @@ class BleRepository(private val context: Context) {
         addLog("Device: $deviceName, isBsc200s=$isBsc200s")
 
         var hasStandardBattery = false
+        txCharacteristics.clear()
         nusRxCharacteristic = null
-        nusTxCharacteristic = null
 
         services.forEach { service ->
             val serviceUuid = service.uuid.toString()
@@ -275,8 +279,8 @@ class BleRepository(private val context: Context) {
                     addLog("    -> Standard Battery Service!")
                     hasStandardBattery = true
                 }
-                serviceUuid.equals(NUS_SERVICE_UUID, ignoreCase = true) -> {
-                    addLog("    -> iGPSPORT NUS Service!")
+                serviceUuid.startsWith("6e400001", ignoreCase = true) -> {
+                    addLog("    -> iGPSPORT Custom Service!")
                 }
                 serviceUuid.startsWith("000018") -> {
                     val serviceType = when (serviceUuid.substring(4, 8)) {
@@ -309,16 +313,17 @@ class BleRepository(private val context: Context) {
                     enableBatteryNotification(characteristic)
                 }
 
-                // NUS RX (Write)
+                // iGPSPORT Write Channel (primarily cca9e)
                 if (charUuid.equals(NUS_RX_UUID, ignoreCase = true)) {
-                    addLog("      -> NUS RX (Write) characteristic found!")
+                    addLog("      -> iGPSPORT RX (Write) characteristic found!")
                     nusRxCharacteristic = characteristic
                 }
 
-                // NUS TX (Notify)
-                if (charUuid.equals(NUS_TX_UUID, ignoreCase = true)) {
-                    addLog("      -> NUS TX (Notify) characteristic found!")
-                    nusTxCharacteristic = characteristic
+                // iGPSPORT Notify Channels
+                if (charUuid.contains("6e400003", ignoreCase = true)) {
+                    val suffix = charUuid.substring(charUuid.length - 5)
+                    addLog("      -> iGPSPORT TX (Notify) channel found: $suffix")
+                    txCharacteristics[charUuid] = characteristic
                 }
             }
             charInfo[serviceUuid] = characteristics
@@ -331,50 +336,45 @@ class BleRepository(private val context: Context) {
             _events.emit(BleEvent.ServicesDiscovered(serviceInfo))
         }
 
-        // BSC200Sの場合、NUS Notifyを有効にしてバッテリー要求を送信
+        // BSC200Sの場合、全Notifyを有効にしてから要求を送信
         if (isBsc200s && !hasStandardBattery) {
             repositoryScope.launch {
-                delay(300)
+                delay(500)
                 setupBsc200sBatteryRead()
             }
         }
     }
 
-    /**
-     * BSC200Sのバッテリー読取りセットアップ
-     * 1. NUS TXのNotifyを有効化
-     * 2. バッテリー情報リクエストを送信
-     */
     private fun setupBsc200sBatteryRead() {
         val gatt = bluetoothGatt ?: run {
             addLog("GATT is null, cannot setup BSC200S")
             return
         }
 
-        val txChar = nusTxCharacteristic ?: run {
-            addLog("NUS TX characteristic not found")
+        if (txCharacteristics.isEmpty()) {
+            addLog("No iGPSPORT TX channels found")
             return
         }
 
-        // NUS TXのNotifyを有効化
-        addLog("Enabling NUS TX notifications...")
-        gatt.setCharacteristicNotification(txChar, true)
-
-        val cccd = txChar.getDescriptor(UUID.fromString(CCCD_UUID))
-        if (cccd != null) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
-            } else {
-                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(cccd)
-            }
-        } else {
-            addLog("CCCD descriptor not found for NUS TX")
-        }
-
-        // 少し待ってからバッテリーリクエスト送信
         repositoryScope.launch {
-            delay(500)
+            // 全てのTXチャネルの通知を順次有効化
+            txCharacteristics.forEach { (uuid, char) ->
+                addLog("Enabling notifications for $uuid...")
+                gatt.setCharacteristicNotification(char, true)
+                val cccd = char.getDescriptor(UUID.fromString(CCCD_UUID))
+                if (cccd != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                    } else {
+                        cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                        gatt.writeDescriptor(cccd)
+                    }
+                    delay(300) // 連続書き込みを避けるため待機
+                }
+            }
+
+            addLog("All custom notifications requested. Waiting for stability...")
+            delay(1000)
             sendBsc200sBatteryRequest()
         }
     }
@@ -402,13 +402,11 @@ class BleRepository(private val context: Context) {
         addLog("Request data: $valueStr")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val result = gatt.writeCharacteristic(rxChar, request, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-            addLog("Write result (TIRAMISU+): $result")
+            gatt.writeCharacteristic(rxChar, request, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
         } else {
             rxChar.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             rxChar.value = request
-            val result = gatt.writeCharacteristic(rxChar)
-            addLog("Write result (legacy): $result")
+            gatt.writeCharacteristic(rxChar)
         }
     }
 
@@ -424,19 +422,17 @@ class BleRepository(private val context: Context) {
 
         // ヘッダー (20バイト)
         val header = ByteArray(20)
-        header[0] = 0x01       // first_command
+        header[0] = 0x01
         header[1] = 0x0B       // service = FACTORY (11)
-        header[2] = 0xFF.toByte() // sub_service
-        header[3] = 0xFF.toByte() // file_tag
+        header[2] = 0xFF.toByte()
+        header[3] = 0xFF.toByte()
         header[4] = 0x06       // operation = BATTARY_GET (6)
-        header[5] = 0xFF.toByte() // sub_operation
-        header[6] = 0xFF.toByte() // reserved
-        // payload_size as u16 BE
+        header[5] = 0xFF.toByte()
+        header[6] = 0xFF.toByte()
         header[7] = (payloadSize shr 8).toByte()
         header[8] = payloadSize.toByte()
-        header[9] = payloadCrc  // payload CRC
-        header[10] = 0x01       // end_marker
-        // bytes 11-18: reserved (0xFF)
+        header[9] = payloadCrc
+        header[10] = 0x00       // Request flag (Responseは0x01)
         for (i in 11..18) {
             header[i] = 0xFF.toByte()
         }
@@ -483,32 +479,32 @@ class BleRepository(private val context: Context) {
         val payloadHex = payload.joinToString(" ") { "0x%02X".format(it) }
         addLog("Payload: $payloadHex")
 
-        // ペイロード内で 08 0B 10 06 のパターンを探す
-        val commandPattern = byteArrayOf(0x08, 0x0B, 0x10, 0x06)
-        val patternIndex = findPattern(payload, commandPattern)
+        // 08 0B 10 06 パターンを探す
+        val pattern = byteArrayOf(0x08, 0x0B, 0x10, 0x06)
+        val idx = findPattern(payload, pattern)
 
-        if (patternIndex < 0) {
-            addLog("Command pattern 08 0B 10 06 not found in payload")
-            parseBatteryFallback(payload)
-            return
-        }
-
-        addLog("Found command pattern at payload offset $patternIndex")
-
-        // パターンの後のデータから 10 タグを探す
-        val afterPattern = payload.copyOfRange(patternIndex + 4, payload.size)
-        val batteryLevel = findBatteryInProtobuf(afterPattern)
-
-        if (batteryLevel != null) {
-            _batteryLevel.value = batteryLevel
-            addLog("BSC200S Battery level: $batteryLevel%")
-            repositoryScope.launch {
-                _events.emit(BleEvent.BatteryLevelChanged(batteryLevel))
+        if (idx >= 0) {
+            addLog("Found command pattern at payload offset $idx")
+            // パターンの後にある 10 [Level] を探す
+            for (i in (idx + 4) until (payload.size - 1)) {
+                if (payload[i] == 0x10.toByte()) {
+                    val level = payload[i + 1].toInt() and 0xFF
+                    if (level in 0..100) {
+                        _batteryLevel.value = level
+                        addLog("BSC200S Battery level: $level%")
+                        repositoryScope.launch {
+                            _events.emit(BleEvent.BatteryLevelChanged(level))
+                        }
+                        return
+                    }
+                }
             }
         } else {
-            addLog("Battery level not found in protobuf after pattern")
-            parseBatteryFallback(payload)
+            addLog("Command pattern 08 0B 10 06 not found in payload")
         }
+        
+        // フォールバック
+        parseBatteryFallback(payload)
     }
 
     /**
@@ -627,14 +623,24 @@ class BleRepository(private val context: Context) {
         currentDevice = device
         isBsc200s = false
         mtuNegotiated = false
+        txCharacteristics.clear()
         nusRxCharacteristic = null
-        nusTxCharacteristic = null
 
-        try {
-            bluetoothGatt = device.connectGatt(context, false, gattCallback)
-        } catch (e: SecurityException) {
-            addLog("Security exception: ${e.message}")
-            _connectionState.value = ConnectionState.Error("Permission denied")
+        repositoryScope.launch {
+            // 前回の切断から時間が短いと133エラーになりやすいため待機
+            delay(1000)
+            
+            try {
+                // TRANSPORT_LEを明示的に指定して接続安定性を向上
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+                } else {
+                    bluetoothGatt = device.connectGatt(context, false, gattCallback)
+                }
+            } catch (e: SecurityException) {
+                addLog("Security exception: ${e.message}")
+                _connectionState.value = ConnectionState.Error("Permission denied")
+            }
         }
     }
 
