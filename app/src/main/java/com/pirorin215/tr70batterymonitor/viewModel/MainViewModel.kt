@@ -39,6 +39,9 @@ class MainViewModel : ViewModel() {
 
         // スキャン継続確認間隔 - スキャンが止まっていないか確認
         private const val SCAN_CHECK_INTERVAL_MS = 60000L
+
+        // デバイス切断検知時間（ミリ秒） - この時間検出されないと切断とみなす
+        private const val DEVICE_DISCONNECT_TIMEOUT_MS = 120000L // 2分
     }
 
     private lateinit var repository: BleRepository
@@ -94,6 +97,7 @@ class MainViewModel : ViewModel() {
                             if (info != null && info.batteryLevel == null) {
                                 updateDeviceStatus(address, DeviceStatus.ERROR)
                             }
+                            // バッテリー取得済みの場合はCOMPLETEDを維持
                         }
                         isProcessing = false
                         currentProcessingAddress = null
@@ -144,19 +148,21 @@ class MainViewModel : ViewModel() {
                     val address = currentProcessingAddress
                     if (address != null) {
                         cancelTimeout()
-                        updateDeviceStatus(address, DeviceStatus.READING)
                         val deviceInfo = deviceBatteryMap[address]
                         if (deviceInfo != null) {
                             deviceBatteryMap[address] = deviceInfo.copy(
                                 batteryLevel = level,
+                                status = DeviceStatus.CONNECTED,  // 接続維持
                                 lastUpdate = System.currentTimeMillis()
                             )
                             _deviceList.value = deviceBatteryMap.values.toList()
 
-                            // バッテリー取得完了したら切断して次のデバイスへ
-                            appendLog("バッテリー取得完了。切断して次のデバイスへ...")
-                            repository.disconnect()
+                            // 常時接続設計：切断しないで接続を維持
+                            appendLog("バッテリー取得完了。接続を維持します。")
                         }
+                        isProcessing = false
+                        currentProcessingAddress = null
+                        processNextDevice()  // 次のデバイスも接続
                     }
                 }
             }
@@ -175,27 +181,47 @@ class MainViewModel : ViewModel() {
             repository.events.collect { event ->
                 when (event) {
                     is BleEvent.ServicesDiscovered -> {
-                        appendLog("Service発見完了")
+                        appendLog("Service発見完了 (${event.address})")
                         event.services.forEach { appendLog("  $it") }
                     }
                     is BleEvent.BatteryLevelChanged -> {
-                        appendLog("バッテリー更新: ${event.level}%")
+                        appendLog("バッテリー更新 (${event.address}): ${event.level}%")
+                        
+                        // デバイス個別の更新
+                        val deviceInfo = deviceBatteryMap[event.address]
+                        if (deviceInfo != null) {
+                            deviceBatteryMap[event.address] = deviceInfo.copy(
+                                batteryLevel = event.level,
+                                status = DeviceStatus.CONNECTED,
+                                lastUpdate = System.currentTimeMillis()
+                            )
+                            _deviceList.value = deviceBatteryMap.values.toList()
+                        }
                     }
                     is BleEvent.CharacteristicRead -> {
-                        appendLog("Characteristic読取: ${event.uuid} = ${event.value}")
+                        appendLog("Characteristic読取 (${event.address}): ${event.uuid} = ${event.value}")
                     }
                     is BleEvent.RssiUpdated -> {
-                        appendLog("RSSI更新: ${event.rssi} dBm")
-                        val address = currentProcessingAddress
-                        if (address != null) {
-                            updateDeviceRssi(address, event.rssi)
+                        appendLog("RSSI更新 (${event.address}): ${event.rssi} dBm")
+                        updateDeviceRssi(event.address, event.rssi)
+                    }
+                    is BleEvent.Disconnected -> {
+                        appendLog("切断検知 (${event.address})")
+                        // 接続維持設計のため、切断されたらリスト上のステータスを DISCONNECTED に更新
+                        updateDeviceStatus(event.address, DeviceStatus.DISCONNECTED)
+                        
+                        // もし現在処理中のデバイスが切断された場合は次のデバイスへ
+                        if (event.address == currentProcessingAddress) {
+                            isProcessing = false
+                            currentProcessingAddress = null
+                            processNextDevice()
                         }
                     }
                     is BleEvent.Ready -> {
-                        appendLog("デバイス準備完了")
+                        appendLog("デバイス準備完了 (${event.address})")
                     }
                     is BleEvent.Error -> {
-                        appendLog("エラー: ${event.message}")
+                        appendLog("エラー (${event.address ?: "unknown"}): ${event.message}")
                     }
                 }
             }
@@ -329,15 +355,26 @@ class MainViewModel : ViewModel() {
         // 既存のエントリがある場合
         val existingInfo = deviceBatteryMap[address]
         if (existingInfo != null) {
-            // RSSI更新（スキャンから再検出された場合など）
-            if (rssi != null) {
-                deviceBatteryMap[address] = existingInfo.copy(rssi = rssi)
-                _deviceList.value = deviceBatteryMap.values.toList()
-            }
+            // 最終検出時間とRSSI更新（スキャンから再検出された場合など）
+            deviceBatteryMap[address] = existingInfo.copy(
+                rssi = rssi ?: existingInfo.rssi,
+                lastDetectedTime = System.currentTimeMillis()
+            )
+            _deviceList.value = deviceBatteryMap.values.toList()
+
             // バッテリー取得済みの場合はスキップ
             if (existingInfo.batteryLevel != null) {
                 appendLog("  → バッテリー取得済み: $deviceName (${existingInfo.batteryLevel}%)")
                 return
+            }
+            // 既存エントリがあるがバッテリー未取得の場合、pendingDevicesに追加
+            appendLog("  → バッテリー未取得の既存デバイス: $deviceName")
+            if (!pendingDevices.any { it.address == address }) {
+                pendingDevices.add(device)
+                appendLog("  → ペンディングリストに追加: $deviceName (${pendingDevices.size}台)")
+                if (!isProcessing) {
+                    processNextDevice()
+                }
             }
             return
         }
@@ -414,6 +451,47 @@ class MainViewModel : ViewModel() {
     }
 
     /**
+     * 切断検知：一定時間検出されないデバイスを切断とみなす
+     */
+    private fun checkDisconnectedDevices() {
+        val currentTime = System.currentTimeMillis()
+        val disconnectedDevices = mutableListOf<String>()
+
+        deviceBatteryMap.forEach { (address, info) ->
+            // バッテリー取得済みのデバイスのみ対象
+            if (info.batteryLevel != null) {
+                val timeSinceLastDetection = currentTime - info.lastDetectedTime
+
+                if (timeSinceLastDetection > DEVICE_DISCONNECT_TIMEOUT_MS) {
+                    disconnectedDevices.add(address)
+                    appendLog("デバイス切断検知: ${info.deviceName} (${timeSinceLastDetection / 1000}秒間検出なし)")
+                }
+            }
+        }
+
+        // 切断されたデバイスを削除
+        disconnectedDevices.forEach { address ->
+            val info = deviceBatteryMap[address]
+            if (info != null) {
+                // ステータスを切断に変更
+                deviceBatteryMap[address] = info.copy(status = DeviceStatus.DISCONNECTED)
+                _deviceList.value = deviceBatteryMap.values.toList()
+
+                // 通知発行（後で実装）
+                // notifyDeviceDisconnected(info.deviceName)
+
+                // 数秒後にマップから削除
+                viewModelScope.launch {
+                    delay(5000) // 5秒間表示してから削除
+                    deviceBatteryMap.remove(address)
+                    _deviceList.value = deviceBatteryMap.values.toList()
+                    appendLog("デバイス情報を削除: ${info.deviceName}")
+                }
+            }
+        }
+    }
+
+    /**
      * 既存デバイスの再スキャン（バッテリー再取得）
      */
     private fun rescanExistingDevices() {
@@ -458,6 +536,9 @@ class MainViewModel : ViewModel() {
         scanCheckJob = viewModelScope.launch {
             while (true) {
                 delay(SCAN_CHECK_INTERVAL_MS)
+
+                // 切断検知：一定時間検出されないデバイスを切断とみなす
+                checkDisconnectedDevices()
 
                 // 処理中のデバイスがなく、ペンディングデバイスもない場合、スキャンを再開
                 if (!isProcessing && pendingDevices.isEmpty() && deviceBatteryMap.isNotEmpty()) {

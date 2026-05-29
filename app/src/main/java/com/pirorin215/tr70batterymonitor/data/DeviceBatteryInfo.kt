@@ -6,7 +6,8 @@ data class DeviceBatteryInfo(
     val batteryLevel: Int?,
     val rssi: Int? = null,
     val status: DeviceStatus = DeviceStatus.SCANNING,
-    val lastUpdate: Long = System.currentTimeMillis()
+    val lastUpdate: Long = System.currentTimeMillis(),
+    val lastDetectedTime: Long = System.currentTimeMillis()
 ) {
     companion object {
         const val UNKNOWN_BATTERY = -1
@@ -36,6 +37,7 @@ data class DeviceBatteryInfo(
             DeviceStatus.CONNECTED -> "接続済み"
             DeviceStatus.READING -> "読取中"
             DeviceStatus.COMPLETED -> "取得済み"
+            DeviceStatus.DISCONNECTED -> "切断"
             DeviceStatus.ERROR -> "エラー"
         }
     }
@@ -48,5 +50,6 @@ enum class DeviceStatus {
     CONNECTED,
     READING,
     COMPLETED,
+    DISCONNECTED,
     ERROR
 }

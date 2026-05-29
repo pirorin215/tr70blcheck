@@ -262,6 +262,7 @@ class MainActivity : AppCompatActivity() {
             DeviceStatus.CONNECTING,
             DeviceStatus.FOUND -> Color.parseColor("#E65100")
             DeviceStatus.SCANNING -> Color.parseColor("#616161")
+            DeviceStatus.DISCONNECTED -> Color.parseColor("#757575")
             DeviceStatus.ERROR -> Color.parseColor("#C62828")
         }
     }
@@ -274,6 +275,7 @@ class MainActivity : AppCompatActivity() {
             DeviceStatus.CONNECTING,
             DeviceStatus.FOUND -> Color.parseColor("#FFF3E0")
             DeviceStatus.SCANNING -> Color.parseColor("#F5F5F5")
+            DeviceStatus.DISCONNECTED -> Color.parseColor("#EEEEEE")
             DeviceStatus.ERROR -> Color.parseColor("#FFEBEE")
         }
     }

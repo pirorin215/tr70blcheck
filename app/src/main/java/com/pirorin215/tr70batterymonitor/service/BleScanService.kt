@@ -142,7 +142,6 @@ class BleScanService : Service() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
             val deviceName = result.device.name ?: "(no name)"
-            Log.d(TAG, "Found device: $deviceName (${result.device.address}), RSSI: ${result.rssi}")
 
             // TR70、BSC200Sなどのバッテリーデバイスを探す
             // 該当デバイス名を含むデバイスを対象
@@ -154,7 +153,7 @@ class BleScanService : Service() {
                 deviceName.contains("RTL510", ignoreCase = true) ||
                 deviceName.contains("RTR510", ignoreCase = true)) {
 
-                Log.d(TAG, "Target device found: $deviceName")
+                Log.d(TAG, "Target device found: $deviceName (${result.device.address}), RSSI: ${result.rssi}")
                 // スキャンを継続して複数デバイスを見つける
                 CoroutineScope(Dispatchers.IO).launch {
                     BleScanServiceManager.emitDeviceFound(result.device, result.rssi)
