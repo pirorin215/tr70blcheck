@@ -33,6 +33,12 @@ class MainViewModel : ViewModel() {
 
         // デバイスごとのタイムアウト（ミリ秒）
         private const val DEVICE_TIMEOUT_MS = 15000L
+
+        // 自動再スキャン間隔（ミリ秒） - 5分ごとにバッテリーを再取得
+        private const val RESCAN_INTERVAL_MS = 300000L
+
+        // スキャン継続確認間隔 - スキャンが止まっていないか確認
+        private const val SCAN_CHECK_INTERVAL_MS = 60000L
     }
 
     private lateinit var repository: BleRepository
@@ -42,6 +48,8 @@ class MainViewModel : ViewModel() {
     private var isProcessing = false
     private var currentProcessingAddress: String? = null
     private var timeoutJob: Job? = null
+    private var autoRescanJob: Job? = null
+    private var scanCheckJob: Job? = null
 
     // UI States
     private val _connectionState = MutableStateFlow("Disconnected")
@@ -243,6 +251,12 @@ class MainViewModel : ViewModel() {
     fun startScan() {
         appendLog("スキャン開始...")
 
+        // 既存のジョブをキャンセル
+        autoRescanJob?.cancel()
+        scanCheckJob?.cancel()
+        autoRescanJob = null
+        scanCheckJob = null
+
         // 既存のGATT接続を切断
         repository.disconnect()
         cancelTimeout()
@@ -261,6 +275,9 @@ class MainViewModel : ViewModel() {
         viewModelScope.launch {
             BleScanServiceManager.emitRestartScan()
         }
+
+        // スキャン継続チェックを開始
+        startScanCheck()
     }
 
     private fun checkBondedDevices() {
@@ -367,6 +384,9 @@ class MainViewModel : ViewModel() {
             if (pendingDevices.isEmpty() && deviceBatteryMap.isNotEmpty()) {
                 appendLog("すべてのデバイス処理完了")
                 _connectionState.value = "All Devices Processed"
+
+                // 自動再スキャンを開始（5分後に次のスキャン）
+                startAutoRescan()
             }
             return
         }
@@ -380,12 +400,99 @@ class MainViewModel : ViewModel() {
         repository.connect(nextDevice)
     }
 
+    /**
+     * 自動再スキャンを開始（5分後に次のスキャン）
+     */
+    private fun startAutoRescan() {
+        autoRescanJob?.cancel()
+        autoRescanJob = viewModelScope.launch {
+            appendLog("${RESCAN_INTERVAL_MS / 60000}分後に自動再スキャンを開始します")
+            delay(RESCAN_INTERVAL_MS)
+            appendLog("自動再スキャンを開始...")
+            rescanExistingDevices()
+        }
+    }
+
+    /**
+     * 既存デバイスの再スキャン（バッテリー再取得）
+     */
+    private fun rescanExistingDevices() {
+        if (deviceBatteryMap.isEmpty()) {
+            appendLog("デバイスが見つかりません。新規スキャンを開始...")
+            startScan()
+            return
+        }
+
+        appendLog("既存デバイスのバッテリーを再取得します")
+        isProcessing = false
+        currentProcessingAddress = null
+        pendingDevices.clear()
+
+        // 既存デバイスのバッテリー情報をクリア（再取得のため）
+        deviceBatteryMap.keys.forEach { address ->
+            val existingInfo = deviceBatteryMap[address]
+            if (existingInfo != null) {
+                deviceBatteryMap[address] = existingInfo.copy(
+                    batteryLevel = null,
+                    status = DeviceStatus.FOUND,
+                    lastUpdate = System.currentTimeMillis()
+                )
+            }
+        }
+        _deviceList.value = deviceBatteryMap.values.toList()
+
+        // スキャンを再開してデバイスを探す
+        viewModelScope.launch {
+            BleScanServiceManager.emitRestartScan()
+        }
+
+        // スキャン継続チェックを再開
+        startScanCheck()
+    }
+
+    /**
+     * スキャン継続チェック - スキャンが止まっていないか確認し、止まっていたら再開
+     */
+    private fun startScanCheck() {
+        scanCheckJob?.cancel()
+        scanCheckJob = viewModelScope.launch {
+            while (true) {
+                delay(SCAN_CHECK_INTERVAL_MS)
+
+                // 処理中のデバイスがなく、ペンディングデバイスもない場合、スキャンを再開
+                if (!isProcessing && pendingDevices.isEmpty() && deviceBatteryMap.isNotEmpty()) {
+                    // 未処理のデバイスがあるか確認
+                    val hasUnprocessedDevices = deviceBatteryMap.values.any { it.batteryLevel == null }
+
+                    if (hasUnprocessedDevices) {
+                        appendLog("未処理デバイスがあります。スキャンを再開...")
+                        BleScanServiceManager.emitRestartScan()
+                    } else {
+                        // 全デバイス処理完了済みの場合は何もしない（自動再スキャンが動いている）
+                        appendLog("全デバイス処理完了。自動再スキャンを待機中...")
+                    }
+                } else if (!isProcessing && pendingDevices.isEmpty() && deviceBatteryMap.isEmpty()) {
+                    // デバイスが見つからない場合、スキャンを再開
+                    appendLog("デバイスが見つかりません。スキャンを継続...")
+                    BleScanServiceManager.emitRestartScan()
+                }
+            }
+        }
+    }
+
     fun connectToDevice() {
         appendLog("自動処理中です。お待ちください...")
     }
 
     fun disconnect() {
         appendLog("全デバイス切断リクエスト...")
+
+        // 自動再スキャンとスキャンチェックを停止
+        autoRescanJob?.cancel()
+        scanCheckJob?.cancel()
+        autoRescanJob = null
+        scanCheckJob = null
+
         cancelTimeout()
         repository.disconnect()
         deviceBatteryMap.clear()
@@ -409,6 +516,8 @@ class MainViewModel : ViewModel() {
 
     override fun onCleared() {
         super.onCleared()
+        autoRescanJob?.cancel()
+        scanCheckJob?.cancel()
         cancelTimeout()
         repository.close()
     }
