@@ -20,8 +20,7 @@ import com.pirorin215.tr70batterymonitor.data.DeviceBatteryInfo
 import com.pirorin215.tr70batterymonitor.data.DeviceStatus
 import com.pirorin215.tr70batterymonitor.service.BleScanService
 import com.pirorin215.tr70batterymonitor.service.BleScanServiceManager
-import com.pirorin215.tr70batterymonitor.service.ScannedDevice
-import com.pirorin215.tr70batterymonitor.viewmodel.MainViewModel
+import com.pirorin215.tr70batterymonitor.viewModel.MainViewModel
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -29,8 +28,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var viewModel: MainViewModel
 
     private lateinit var tvStatus: TextView
-    private lateinit var tvDeviceInfo: TextView
-    private lateinit var tvServices: TextView
     private lateinit var tvLogs: TextView
     private lateinit var deviceCardContainer: LinearLayout
     private lateinit var tvNoDevices: TextView
@@ -41,7 +38,6 @@ class MainActivity : AppCompatActivity() {
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (allGranted) {
-            viewModel.onPermissionsGranted()
             startBleScanService()
             viewModel.startScan()
         }
@@ -58,8 +54,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun initViews() {
         tvStatus = findViewById(R.id.tv_status)
-        tvDeviceInfo = findViewById(R.id.tv_device_info)
-        tvServices = findViewById(R.id.tv_services)
         tvLogs = findViewById(R.id.tv_logs)
         deviceCardContainer = findViewById(R.id.device_card_container)
         tvNoDevices = findViewById(R.id.tv_no_devices)
@@ -75,32 +69,8 @@ class MainActivity : AppCompatActivity() {
         viewModel.init(this)
 
         lifecycleScope.launch {
-            viewModel.connectionState.collect { state ->
-                updateStatusUI(state)
-            }
-        }
-
-        lifecycleScope.launch {
-            viewModel.deviceInfo.collect { info ->
-                tvDeviceInfo.text = info
-            }
-        }
-
-        lifecycleScope.launch {
-            viewModel.servicesInfo.collect { info ->
-                tvServices.text = info
-            }
-        }
-
-        lifecycleScope.launch {
             viewModel.logs.collect { logs ->
                 tvLogs.text = logs
-            }
-        }
-
-        lifecycleScope.launch {
-            BleScanServiceManager.deviceFoundFlow.collect { scannedDevice: ScannedDevice ->
-                viewModel.onDeviceFound(scannedDevice.device)
             }
         }
 

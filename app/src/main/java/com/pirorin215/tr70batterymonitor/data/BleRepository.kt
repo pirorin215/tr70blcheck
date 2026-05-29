@@ -29,6 +29,7 @@ sealed class ConnectionState {
 }
 
 sealed class BleEvent {
+    data class Connected(val device: BluetoothDevice) : BleEvent()
     data class ServicesDiscovered(val address: String, val services: List<String>) : BleEvent()
     data class CharacteristicRead(val address: String, val uuid: String, val value: String) : BleEvent()
     data class BatteryLevelChanged(val address: String, val level: Int) : BleEvent()
@@ -43,57 +44,26 @@ class BleRepository(private val context: Context) {
 
     companion object {
         const val TAG = "BleRepository"
-
-        // Standard UUIDs (TR70/Garmin用)
         const val BATTERY_SERVICE_UUID = "0000180F-0000-1000-8000-00805F9B34FB"
         const val BATTERY_LEVEL_UUID = "00002A19-0000-1000-8000-00805F9B34FB"
         const val CCCD_UUID = "00002902-0000-1000-8000-00805F9B34FB"
-
-        // BSC200S (iGPSPORT) NUS UUIDs
         const val NUS_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
-        const val NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"  // Write
-        const val NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"  // Notify
+        const val NUS_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+        const val NUS_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
     }
 
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gattMap = java.util.concurrent.ConcurrentHashMap<String, BluetoothGatt>()
-    private var currentDevice: BluetoothDevice? = null
-    
-    // デバイスごとのフラグ管理
     private val isBsc200sMap = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    private val mtuNegotiatedMap = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
-    
-    private var reconnectionJob: kotlinx.coroutines.Job? = null
-    private var retryCount = 0
-    private val maxRetryCount = 3
-
-    // iGPSPORT characteristics (Map for each device)
     private val txCharsMap = java.util.concurrent.ConcurrentHashMap<String, MutableMap<String, BluetoothGattCharacteristic>>()
     private val nusRxCharMap = java.util.concurrent.ConcurrentHashMap<String, BluetoothGattCharacteristic>()
 
-    // State flows
     private val _connectionState = MutableStateFlow<ConnectionState>(ConnectionState.Disconnected)
     val connectionState = _connectionState.asStateFlow()
 
     private val _events = MutableSharedFlow<BleEvent>()
     val events = _events.asSharedFlow()
 
-    // Discovered information
-    private val _discoveredServices = MutableStateFlow<List<String>>(emptyList())
-    val discoveredServices = _discoveredServices.asStateFlow()
-
-    private val _characteristicsInfo = MutableStateFlow<Map<String, List<String>>>(emptyMap())
-    val characteristicsInfo = _characteristicsInfo.asStateFlow()
-
-    // Battery level
-    private val _batteryLevel = MutableStateFlow<Int?>(null)
-    val batteryLevel = _batteryLevel.asStateFlow()
-
-    // RSSI
-    private val _rssi = MutableStateFlow<Int?>(null)
-    val rssi = _rssi.asStateFlow()
-
-    // Log storage
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs = _logs.asStateFlow()
 
@@ -114,34 +84,25 @@ class BleRepository(private val context: Context) {
                     BluetoothProfile.STATE_CONNECTED -> {
                         addLog("Connected to $deviceAddress")
                         gattMap[deviceAddress] = gatt
-                        _connectionState.value = ConnectionState.Connected(gatt.device)
-
-                        // RSSI読取り
+                        repositoryScope.launch {
+                            _events.emit(BleEvent.Connected(gatt.device))
+                        }
                         gatt.readRemoteRssi()
-
-                        // MTUネゴシエーション
-                        mtuNegotiatedMap[deviceAddress] = false
                         addLog("Requesting MTU 247 for $deviceAddress...")
                         gatt.requestMtu(247)
                     }
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         addLog("Disconnected from $deviceAddress")
                         gattMap.remove(deviceAddress)
-                        _connectionState.value = ConnectionState.Disconnected
-
                         repositoryScope.launch {
                             _events.emit(BleEvent.Disconnected(deviceAddress))
                         }
-
-                        startReconnection(deviceAddress)
                         gatt.close()
                     }
                 }
             } else {
                 addLog("Connection error for $deviceAddress: status=$status")
                 gattMap.remove(deviceAddress)
-                _connectionState.value = ConnectionState.Error("GATT Error $status")
-                
                 repositoryScope.launch {
                     _events.emit(BleEvent.Disconnected(deviceAddress))
                 }
@@ -151,12 +112,7 @@ class BleRepository(private val context: Context) {
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
             val address = gatt.device.address
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("MTU negotiated for $address: $mtu bytes")
-                mtuNegotiatedMap[address] = true
-            } else {
-                addLog("MTU negotiation failed for $address: status=$status")
-            }
+            addLog("MTU for $address: $mtu bytes (status=$status)")
             repositoryScope.launch {
                 delay(300)
                 gatt.discoverServices()
@@ -164,12 +120,9 @@ class BleRepository(private val context: Context) {
         }
 
         override fun onReadRemoteRssi(gatt: BluetoothGatt, rssi: Int, status: Int) {
-            val address = gatt.device.address
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("RSSI for $address: $rssi dBm")
-                _rssi.value = rssi
                 repositoryScope.launch {
-                    _events.emit(BleEvent.RssiUpdated(address, rssi))
+                    _events.emit(BleEvent.RssiUpdated(gatt.device.address, rssi))
                 }
             }
         }
@@ -177,96 +130,42 @@ class BleRepository(private val context: Context) {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             val address = gatt.device.address
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("Services discovered successfully for $address")
+                addLog("Services discovered for $address")
                 analyzeServices(gatt)
-            } else {
-                addLog("Service discovery failed for $address: status=$status")
-                repositoryScope.launch {
-                    _events.emit(BleEvent.Error(address, "Service discovery failed"))
-                }
             }
         }
 
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
+        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray, status: Int) {
             val address = gatt.device.address
             if (status == BluetoothGatt.GATT_SUCCESS) {
                 val uuid = characteristic.uuid.toString()
-                val valueStr = value.joinToString(", ") { "0x%02X".format(it) }
-                addLog("Read characteristic for $address $uuid: $valueStr")
-
                 if (uuid.equals(BATTERY_LEVEL_UUID, ignoreCase = true) && value.isNotEmpty()) {
                     val level = value[0].toInt() and 0xFF
-                    _batteryLevel.value = level
-                    addLog("Battery level for $address: $level%")
                     repositoryScope.launch {
                         _events.emit(BleEvent.BatteryLevelChanged(address, level))
                     }
                 }
-
-                repositoryScope.launch {
-                    _events.emit(BleEvent.CharacteristicRead(address, uuid, valueStr))
-                }
             }
         }
 
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, value: ByteArray) {
             val address = gatt.device.address
             val uuid = characteristic.uuid.toString()
-            val valueStr = value.joinToString(", ") { "0x%02X".format(it) }
-            addLog("Characteristic changed for $address $uuid: $valueStr")
-
             if (uuid.equals(BATTERY_LEVEL_UUID, ignoreCase = true) && value.isNotEmpty()) {
                 val level = value[0].toInt() and 0xFF
-                _batteryLevel.value = level
-                addLog("Battery level changed for $address: $level%")
                 repositoryScope.launch {
                     _events.emit(BleEvent.BatteryLevelChanged(address, level))
                 }
-            }
-
-            if (uuid.contains("6e400003", ignoreCase = true)) {
-                if (uuid.equals(NUS_TX_UUID, ignoreCase = true)) {
-                    parseBsc200sBatteryResponse(address, value)
-                }
+            } else if (uuid.equals(NUS_TX_UUID, ignoreCase = true)) {
+                parseBsc200sBatteryResponse(address, value)
             }
         }
 
-        override fun onDescriptorWrite(
-            gatt: BluetoothGatt,
-            descriptor: BluetoothGattDescriptor,
-            status: Int
-        ) {
-            val address = gatt.device.address
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
             if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("Descriptor written successfully for $address")
                 repositoryScope.launch {
-                    _events.emit(BleEvent.Ready(address))
+                    _events.emit(BleEvent.Ready(gatt.device.address))
                 }
-            } else {
-                addLog("Descriptor write failed for $address: status=$status")
-            }
-        }
-
-        override fun onCharacteristicWrite(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            status: Int
-        ) {
-            val address = gatt.device.address
-            val uuid = characteristic.uuid.toString()
-            if (status == BluetoothGatt.GATT_SUCCESS) {
-                addLog("Write successful to $address $uuid")
-            } else {
-                addLog("Write failed to $address $uuid: status=$status")
             }
         }
     }
@@ -274,56 +173,33 @@ class BleRepository(private val context: Context) {
     private fun analyzeServices(gatt: BluetoothGatt) {
         val address = gatt.device.address
         val services = gatt.services
-        val serviceInfo = mutableListOf<String>()
-        val charInfo = mutableMapOf<String, List<String>>()
-
-        addLog("Found ${services.size} services for $address:")
-
         val deviceName = gatt.device.name ?: ""
-        val isBsc200s = deviceName.contains("BSC200", ignoreCase = true) ||
-                     deviceName.contains("iGPSPORT", ignoreCase = true)
+        val isBsc200s = deviceName.contains("BSC200", ignoreCase = true) || deviceName.contains("iGPSPORT", ignoreCase = true)
         isBsc200sMap[address] = isBsc200s
-        addLog("Device: $deviceName ($address), isBsc200s=$isBsc200s")
 
         var hasStandardBattery = false
         val txChars = mutableMapOf<String, BluetoothGattCharacteristic>()
         var nusRxChar: BluetoothGattCharacteristic? = null
 
         services.forEach { service ->
-            val serviceUuid = service.uuid.toString()
-            val characteristics = mutableListOf<String>()
             service.characteristics.forEach { characteristic ->
                 val charUuid = characteristic.uuid.toString()
-                characteristics.add("Characteristic: $charUuid")
-
                 if (charUuid.equals(BATTERY_LEVEL_UUID, ignoreCase = true)) {
-                    readBatteryLevel(gatt, characteristic)
+                    gatt.readCharacteristic(characteristic)
                     enableBatteryNotification(gatt, characteristic)
                     hasStandardBattery = true
                 }
-                if (charUuid.equals(NUS_RX_UUID, ignoreCase = true)) {
-                    nusRxChar = characteristic
-                }
-                if (charUuid.contains("6e400003", ignoreCase = true)) {
-                    txChars[charUuid] = characteristic
-                }
+                if (charUuid.equals(NUS_RX_UUID, ignoreCase = true)) nusRxChar = characteristic
+                if (charUuid.contains("6e400003", ignoreCase = true)) txChars[charUuid] = characteristic
             }
-            charInfo[serviceUuid] = characteristics
-            serviceInfo.add("Service: $serviceUuid")
         }
-
-        _discoveredServices.value = serviceInfo
-        _characteristicsInfo.value = charInfo
         
         txCharsMap[address] = txChars
         nusRxChar?.let { nusRxCharMap[address] = it }
 
         repositoryScope.launch {
-            _events.emit(BleEvent.ServicesDiscovered(address, serviceInfo))
-        }
-
-        if (isBsc200s && !hasStandardBattery) {
-            repositoryScope.launch {
+            _events.emit(BleEvent.ServicesDiscovered(address, services.map { it.uuid.toString() }))
+            if (isBsc200s && !hasStandardBattery) {
                 delay(500)
                 setupBsc200sBatteryRead(address)
             }
@@ -333,12 +209,10 @@ class BleRepository(private val context: Context) {
     private fun setupBsc200sBatteryRead(address: String) {
         val gatt = gattMap[address] ?: return
         val txChars = txCharsMap[address] ?: return
-
         repositoryScope.launch {
-            txChars.forEach { (uuid, char) ->
+            txChars.forEach { (_, char) ->
                 gatt.setCharacteristicNotification(char, true)
-                val cccd = char.getDescriptor(UUID.fromString(CCCD_UUID))
-                if (cccd != null) {
+                char.getDescriptor(UUID.fromString(CCCD_UUID))?.let { cccd ->
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
                     } else {
@@ -346,8 +220,8 @@ class BleRepository(private val context: Context) {
                         cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
                         gatt.writeDescriptor(cccd)
                     }
-                    delay(300)
                 }
+                delay(300)
             }
             delay(2000)
             sendBsc200sBatteryRequest(address)
@@ -357,8 +231,16 @@ class BleRepository(private val context: Context) {
     private fun sendBsc200sBatteryRequest(address: String) {
         val gatt = gattMap[address] ?: return
         val rxChar = nusRxCharMap[address] ?: return
-        val request = buildBatteryRequest()
-
+        val payload = byteArrayOf(0x08, 0x0B, 0x10, 0x06)
+        val payloadCrc = crc8Maxim(payload)
+        val header = ByteArray(20).apply {
+            this[0] = 0x01; this[1] = 0x0B; this[2] = 0xFF.toByte(); this[3] = 0xFF.toByte()
+            this[4] = 0x06; this[5] = 0xFF.toByte(); this[6] = 0xFF.toByte()
+            this[7] = 0; this[8] = payload.size.toByte(); this[9] = payloadCrc; this[10] = 0
+            for (i in 11..18) this[i] = 0xFF.toByte()
+            this[19] = crc8Maxim(this.copyOfRange(0, 19))
+        }
+        val request = header + payload
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             gatt.writeCharacteristic(rxChar, request, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
         } else {
@@ -370,37 +252,12 @@ class BleRepository(private val context: Context) {
         }
     }
 
-    private fun buildBatteryRequest(): ByteArray {
-        val payload = byteArrayOf(0x08, 0x0B, 0x10, 0x06)
-        val payloadSize = payload.size
-        val payloadCrc = crc8Maxim(payload)
-        val header = ByteArray(20)
-        header[0] = 0x01
-        header[1] = 0x0B
-        header[2] = 0xFF.toByte()
-        header[3] = 0xFF.toByte()
-        header[4] = 0x06
-        header[5] = 0xFF.toByte()
-        header[6] = 0xFF.toByte()
-        header[7] = (payloadSize shr 8).toByte()
-        header[8] = payloadSize.toByte()
-        header[9] = payloadCrc
-        header[10] = 0x00
-        for (i in 11..18) { header[i] = 0xFF.toByte() }
-        header[19] = crc8Maxim(header.copyOfRange(0, 19))
-        return header + payload
-    }
-
     private fun crc8Maxim(data: ByteArray): Byte {
         var crc = 0
         for (b in data) {
             crc = crc xor (b.toInt() and 0xFF)
             for (i in 0 until 8) {
-                crc = if (crc and 0x01 != 0) {
-                    (crc shr 1) xor 0x8C
-                } else {
-                    crc shr 1
-                }
+                crc = if (crc and 0x01 != 0) (crc shr 1) xor 0x8C else crc shr 1
             }
         }
         return crc.toByte()
@@ -410,102 +267,55 @@ class BleRepository(private val context: Context) {
         if (data.size < 20) return
         val payload = data.copyOfRange(20, data.size)
         val pattern = byteArrayOf(0x08, 0x0B, 0x10, 0x06)
-        val idx = findPattern(payload, pattern)
+        var idx = -1
+        for (i in 0..payload.size - pattern.size) {
+            if (payload.copyOfRange(i, i + pattern.size).contentEquals(pattern)) { idx = i; break }
+        }
         if (idx >= 0) {
-            // パターンの後にある 0x10 [Level] を探す (ペイロード内の位置が変動することがあるため)
             var levelIdx = -1
             for (i in (idx + 4) until payload.size - 1) {
-                if (payload[i] == 0x10.toByte()) {
-                    levelIdx = i
-                    break
-                }
+                if (payload[i] == 0x10.toByte()) { levelIdx = i; break }
             }
-
             if (levelIdx >= 0 && payload.size > levelIdx + 1) {
                 val level = payload[levelIdx + 1].toInt() and 0xFF
-                addLog("Battery level for $address parsed: $level%")
-                _batteryLevel.value = level
                 repositoryScope.launch {
                     _events.emit(BleEvent.BatteryLevelChanged(address, level))
-                    gattMap[address]?.let { gatt ->
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            addLog("Requesting LOW_POWER for $address after successful data retrieval")
-                            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
-                        }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        gattMap[address]?.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER)
                     }
                 }
             }
         }
     }
 
-    private fun findPattern(data: ByteArray, pattern: ByteArray): Int {
-        for (i in 0..data.size - pattern.size) {
-            var found = true
-            for (j in pattern.indices) {
-                if (data[i + j] != pattern[j]) {
-                    found = false
-                    break
-                }
-            }
-            if (found) return i
-        }
-        return -1
-    }
-
-    private fun readBatteryLevel(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-        gatt.readCharacteristic(characteristic)
-    }
-
     private fun enableBatteryNotification(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         gatt.setCharacteristicNotification(characteristic, true)
-        val descriptor = characteristic.getDescriptor(UUID.fromString(CCCD_UUID))
-        if (descriptor != null) {
+        characteristic.getDescriptor(UUID.fromString(CCCD_UUID))?.let { cccd ->
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
             } else {
                 @Suppress("DEPRECATION")
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
+                cccd.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                gatt.writeDescriptor(cccd)
             }
         }
     }
 
     fun connect(device: BluetoothDevice) {
         val address = device.address
-        _connectionState.value = ConnectionState.Connecting
-        currentDevice = device
+        if (gattMap.containsKey(address)) return
         repositoryScope.launch {
-            delay(1000)
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    gattMap[address] = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-                } else {
-                    gattMap[address] = device.connectGatt(context, false, gattCallback)
-                }
-            } catch (e: SecurityException) {
-                _connectionState.value = ConnectionState.Error("Permission denied")
+            delay(100)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                // autoConnect = true にすることで、OSレベルでアドバタイズを見つけ次第接続されるようにする
+                gattMap[address] = device.connectGatt(context, true, gattCallback, BluetoothDevice.TRANSPORT_LE)
+            } else {
+                gattMap[address] = device.connectGatt(context, true, gattCallback)
             }
         }
     }
 
-    fun disconnect() {
-        gattMap.forEach { (_, gatt) -> gatt.disconnect() }
-    }
-
-    fun disconnect(address: String) {
-        gattMap[address]?.disconnect()
-    }
-
-    fun close() {
-        gattMap.forEach { (_, gatt) -> gatt.close() }
-        gattMap.clear()
-        isBsc200sMap.clear()
-        mtuNegotiatedMap.clear()
-        txCharsMap.clear()
-        nusRxCharMap.clear()
-    }
-
-    private fun startReconnection(deviceAddress: String) { /* Skip for brevity */ }
-    fun readRssi() { gattMap.values.forEach { it.readRemoteRssi() } }
+    fun disconnect(address: String) { gattMap[address]?.disconnect() }
+    fun close() { gattMap.forEach { (_, g) -> g.close() }; gattMap.clear() }
     fun clearLogs() { _logs.value = emptyList() }
 }
