@@ -39,6 +39,9 @@ class BleScanService : Service() {
     private var scanJob: Job? = null
     private var isScanningActive = false
 
+    // 接続状態の追跡（スキャン停止判定用）
+    private val connectedDevices = mutableSetOf<String>()
+
     // デバイスごとの最終ログ出力時間を追跡（ログ出力頻度制限用）
     private val lastLogTimeMap = mutableMapOf<String, Long>()
     private val LOG_INTERVAL_MS = 5000L // 同一デバイスのログ出力間隔（5秒）
@@ -63,6 +66,19 @@ class BleScanService : Service() {
             BleScanServiceManager.restartScanFlow.collect {
                 Log.d(TAG, "Received restart scan signal")
                 startBleScan()
+            }
+        }
+
+        // 接続状態通知の監視
+        CoroutineScope(Dispatchers.IO).launch {
+            BleScanServiceManager.deviceConnectedFlow.collect { deviceAddress ->
+                onDeviceConnected(deviceAddress)
+            }
+        }
+
+        CoroutineScope(Dispatchers.IO).launch {
+            BleScanServiceManager.deviceDisconnectedFlow.collect { deviceAddress ->
+                onDeviceDisconnected(deviceAddress)
             }
         }
     }
@@ -127,6 +143,41 @@ class BleScanService : Service() {
         stopBleScanInternal()
     }
 
+    /**
+     * デバイス接続を通知
+     */
+    fun onDeviceConnected(deviceAddress: String) {
+        connectedDevices.add(deviceAddress)
+        Log.d(TAG, "Device connected: $deviceAddress, total connected: ${connectedDevices.size}")
+
+        // 両デバイスが接続された場合、スキャンを停止
+        if (connectedDevices.size >= 2) {
+            Log.d(TAG, "All devices connected, stopping scan")
+            stopBleScan()
+        }
+    }
+
+    /**
+     * デバイス切断を通知
+     */
+    fun onDeviceDisconnected(deviceAddress: String) {
+        connectedDevices.remove(deviceAddress)
+        Log.d(TAG, "Device disconnected: $deviceAddress, remaining connected: ${connectedDevices.size}")
+
+        // デバイスが切断された場合、スキャンを再開
+        if (connectedDevices.size < 2 && isScanningActive.not()) {
+            Log.d(TAG, "Device disconnected, restarting scan")
+            startBleScan()
+        }
+    }
+
+    /**
+     * 既に接続しているデバイスかチェック
+     */
+    private fun isDeviceConnected(deviceAddress: String): Boolean {
+        return connectedDevices.contains(deviceAddress)
+    }
+
     private val bleScanCallback = @SuppressLint("MissingPermission") object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             super.onScanResult(callbackType, result)
@@ -140,6 +191,12 @@ class BleScanService : Service() {
                 deviceName.contains("RTR510", ignoreCase = true)) {
 
                 val deviceAddress = result.device.address
+
+                // 既に接続しているデバイスは無視
+                if (isDeviceConnected(deviceAddress)) {
+                    return
+                }
+
                 val currentTime = System.currentTimeMillis()
                 val lastLogTime = lastLogTimeMap[deviceAddress] ?: 0L
 

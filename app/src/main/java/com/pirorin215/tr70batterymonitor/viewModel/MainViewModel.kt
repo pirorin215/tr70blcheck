@@ -91,6 +91,11 @@ class MainViewModel : ViewModel() {
                 appendLog("接続成功 ($name)")
                 cancelDeviceTimeout(event.device.address)
                 updateDeviceInfo(event.device.address) { it.copy(status = DeviceStatus.CONNECTED) }
+
+                // BleScanServiceに接続を通知
+                viewModelScope.launch {
+                    BleScanServiceManager.notifyDeviceConnected(event.device.address)
+                }
             }
             is BleEvent.BatteryLevelChanged -> {
                 appendLog("バッテリー更新 (${event.address}): ${event.level}%")
@@ -116,6 +121,11 @@ class MainViewModel : ViewModel() {
                 // 切断時にRSSIをクリア
                 updateDeviceInfo(event.address) {
                     it.copy(status = DeviceStatus.DISCONNECTED, rssi = null)
+                }
+
+                // BleScanServiceに切断を通知
+                viewModelScope.launch {
+                    BleScanServiceManager.notifyDeviceDisconnected(event.address)
                 }
             }
             is BleEvent.RssiUpdated -> {
