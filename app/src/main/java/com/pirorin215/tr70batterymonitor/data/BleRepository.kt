@@ -318,4 +318,5 @@ class BleRepository(private val context: Context) {
     fun disconnect(address: String) { gattMap[address]?.disconnect() }
     fun close() { gattMap.forEach { (_, g) -> g.close() }; gattMap.clear() }
     fun clearLogs() { _logs.value = emptyList() }
+    fun getContext() = context
 }

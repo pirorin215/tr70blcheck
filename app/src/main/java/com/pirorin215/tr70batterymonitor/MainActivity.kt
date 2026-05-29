@@ -20,7 +20,7 @@ import com.pirorin215.tr70batterymonitor.data.DeviceBatteryInfo
 import com.pirorin215.tr70batterymonitor.data.DeviceStatus
 import com.pirorin215.tr70batterymonitor.service.BleScanService
 import com.pirorin215.tr70batterymonitor.service.BleScanServiceManager
-import com.pirorin215.tr70batterymonitor.viewModel.MainViewModel
+import com.pirorin215.tr70batterymonitor.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -32,6 +32,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var deviceCardContainer: LinearLayout
     private lateinit var tvNoDevices: TextView
     private lateinit var btnRescan: Button
+    private lateinit var btnSettings: Button
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -40,6 +41,9 @@ class MainActivity : AppCompatActivity() {
         if (allGranted) {
             startBleScanService()
             viewModel.startScan()
+        } else {
+            // 一部権限が拒否された場合のチェック
+            checkNotificationPermissionAfterRequest()
         }
     }
 
@@ -47,9 +51,15 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 通知チャンネルの作成
+        NotificationHelper.createNotificationChannels(this)
+
         initViews()
         setupViewModel()
         checkPermissions()
+
+        // 通知権限のチェックと催促
+        checkAndRequestNotificationPermission()
     }
 
     private fun initViews() {
@@ -58,9 +68,15 @@ class MainActivity : AppCompatActivity() {
         deviceCardContainer = findViewById(R.id.device_card_container)
         tvNoDevices = findViewById(R.id.tv_no_devices)
         btnRescan = findViewById(R.id.btn_rescan)
+        btnSettings = findViewById(R.id.btn_settings)
 
         btnRescan.setOnClickListener {
             viewModel.startScan()
+        }
+
+        btnSettings.setOnClickListener {
+            val intent = Intent(this, SettingsActivity::class.java)
+            startActivity(intent)
         }
     }
 
@@ -303,6 +319,110 @@ class MainActivity : AppCompatActivity() {
             startForegroundService(serviceIntent)
         } else {
             startService(serviceIntent)
+        }
+    }
+
+    /**
+     * 通知権限が付与されているかチェック
+     */
+    private fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
+                PackageManager.PERMISSION_GRANTED
+        } else {
+            true // Android 13未満は権限不要
+        }
+    }
+
+    /**
+     * 権限リクエスト後に通知権限をチェックし、なければダイアログ表示
+     */
+    private fun checkNotificationPermissionAfterRequest() {
+        if (!hasNotificationPermission()) {
+            showNotificationPermissionDialog()
+        } else {
+            // 通知権限がある場合、BLEスキャン開始
+            startBleScanService()
+            viewModel.startScan()
+        }
+    }
+
+    /**
+     * 通知権限催促ダイアログを表示
+     */
+    private fun showNotificationPermissionDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("通知権限が必要です")
+            .setMessage("低バッテリー通知を受け取るために、通知権限を有効にしてください。\n\n「設定」から通知権限を有効にできます。")
+            .setPositiveButton("設定に移動") { _, _ ->
+                openNotificationSettings()
+            }
+            .setNegativeButton("キャンセル") { dialog, _ ->
+                dialog.dismiss()
+                // 通知権限なしでもBLEスキャン開始
+                startBleScanService()
+                viewModel.startScan()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /**
+     * 通知設定画面を開く
+     */
+    private fun openNotificationSettings() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = android.net.Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(intent)
+        }
+    }
+
+    /**
+     * 通知権限をチェックし、必要に応じてリクエストまたはダイアログを表示
+     */
+    private fun checkAndRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED) {
+
+                // ユーザーが権限を永続的に拒否したかチェック
+                if (shouldShowRequestPermissionRationale(Manifest.permission.POST_NOTIFICATIONS)) {
+                    // 権限の説明が必要な場合
+                    showNotificationRationaleDialog()
+                } else {
+                    // 初回リクエスト
+                    // ここでは何もしない（checkPermissionsで処理済み）
+                }
+            }
+        }
+    }
+
+    /**
+     * 通知権限の説明ダイアログを表示
+     */
+    private fun showNotificationRationaleDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("通知権限について")
+            .setMessage("低バッテリー通知を受け取るために、通知権限が必要です。\n\nデバイスのバッテリー残量が閾値を下回った際に通知でお知らせします。")
+            .setPositiveButton("許可する") { _, _ ->
+                // 権限リクエスト
+                requestNotificationPermission()
+            }
+            .setNegativeButton("キャンセル") { dialog, _ ->
+                dialog.dismiss()
+            }
+            .show()
+    }
+
+    /**
+     * 通知権限をリクエスト
+     */
+    private fun requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            requestPermissionLauncher.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
         }
     }
 }

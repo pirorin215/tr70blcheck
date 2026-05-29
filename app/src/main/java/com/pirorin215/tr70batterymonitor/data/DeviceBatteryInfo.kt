@@ -7,7 +7,8 @@ data class DeviceBatteryInfo(
     val rssi: Int? = null,
     val status: DeviceStatus = DeviceStatus.SCANNING,
     val lastUpdate: Long = System.currentTimeMillis(),
-    val lastDetectedTime: Long = System.currentTimeMillis()
+    val lastDetectedTime: Long = System.currentTimeMillis(),
+    val notifiedLowBattery: Boolean = false
 ) {
     companion object {
         const val UNKNOWN_BATTERY = -1

@@ -1,4 +1,4 @@
-package com.pirorin215.tr70batterymonitor.viewModel
+package com.pirorin215.tr70batterymonitor.viewmodel
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -8,11 +8,14 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pirorin215.tr70batterymonitor.NotificationHelper
 import com.pirorin215.tr70batterymonitor.data.BleEvent
 import com.pirorin215.tr70batterymonitor.data.BleRepository
 import com.pirorin215.tr70batterymonitor.data.ConnectionState
 import com.pirorin215.tr70batterymonitor.data.DeviceBatteryInfo
 import com.pirorin215.tr70batterymonitor.data.DeviceStatus
+import com.pirorin215.tr70batterymonitor.data.SettingsDataStore
+import com.pirorin215.tr70batterymonitor.data.getAllSettings
 import com.pirorin215.tr70batterymonitor.service.BleScanServiceManager
 import com.pirorin215.tr70batterymonitor.service.ScannedDevice
 import kotlinx.coroutines.CoroutineScope
@@ -89,6 +92,10 @@ class MainViewModel : ViewModel() {
             is BleEvent.BatteryLevelChanged -> {
                 appendLog("バッテリー更新 (${event.address}): ${event.level}%")
                 cancelDeviceTimeout(event.address)
+
+                val existingInfo = deviceBatteryMap[event.address]
+                val deviceName = existingInfo?.deviceName ?: "Unknown"
+
                 updateDeviceInfo(event.address) {
                     it.copy(
                         batteryLevel = event.level,
@@ -96,6 +103,9 @@ class MainViewModel : ViewModel() {
                         lastUpdate = System.currentTimeMillis()
                     )
                 }
+
+                // ローバッテリー通知チェック
+                checkLowBatteryNotification(event.address, deviceName, event.level)
             }
             is BleEvent.Disconnected -> {
                 appendLog("切断検知 (${event.address})")
@@ -227,6 +237,129 @@ class MainViewModel : ViewModel() {
         allLogs.add("[$timestamp] $message")
         if (allLogs.size > 100) allLogs.removeAt(0)
         _logs.value = "ログ:\n" + allLogs.takeLast(50).joinToString("\n")
+    }
+
+    /**
+     * ローバッテリー通知をチェックして発行する
+     *
+     * @param address デバイスアドレス
+     * @param deviceName デバイス名
+     * @param batteryLevel バッテリーレベル
+     */
+    private fun checkLowBatteryNotification(address: String, deviceName: String, batteryLevel: Int) {
+        viewModelScope.launch {
+            try {
+                appendLog("通知チェック開始 ($deviceName): ${batteryLevel}%")
+
+                // 設定値を取得（最初の値のみ取得）
+                val settingsFlow = com.pirorin215.tr70batterymonitor.data.SettingsManager.getAllSettings()
+
+                // Flowから最初の値を収集して処理を継続
+                var appSettings: com.pirorin215.tr70batterymonitor.data.AppSettings? = null
+                val job = launch {
+                    settingsFlow.collect { appSettingsValue ->
+                        appSettings = appSettingsValue
+                        // 最初の値を取得したら収集を終了
+                        return@collect
+                    }
+                }
+
+                // 少し待ってから収集をキャンセル
+                kotlinx.coroutines.delay(100)
+                job.cancel()
+
+                val actualSettings = appSettings
+                if (actualSettings == null) {
+                    appendLog("通知チェック: 設定取得失敗、デフォルト値を使用")
+                    // デフォルト値で処理を継続
+                    val threshold = SettingsDataStore.DEFAULT_TR70_THRESHOLD
+                    val existingInfo = deviceBatteryMap[address]
+
+                    val notificationEnabled = SettingsDataStore.DEFAULT_LOW_BATTERY_NOTIFICATION_ENABLED
+                    val isLowBattery = batteryLevel <= threshold
+                    val notNotifiedYet = existingInfo?.notifiedLowBattery != true
+
+                    appendLog("通知条件チェック（デフォルト）: 有効=$notificationEnabled, 低バッテリー=$isLowBattery (${batteryLevel}<=${threshold}), 未通知=$notNotifiedYet")
+
+                    val shouldNotify = notificationEnabled && isLowBattery && notNotifiedYet
+
+                    if (batteryLevel > threshold && existingInfo?.notifiedLowBattery == true) {
+                        updateDeviceInfo(address) { it.copy(notifiedLowBattery = false) }
+                        appendLog("バッテリー回復 ($deviceName): $batteryLevel% -> フラグリセット")
+                    }
+
+                    if (shouldNotify) {
+                        appendLog("通知発行条件を満たしました ($deviceName)")
+                        try {
+                            NotificationHelper.showLowBatteryNotification(
+                                repository.getContext(),
+                                deviceName,
+                                batteryLevel,
+                                threshold
+                            )
+                            updateDeviceInfo(address) { it.copy(notifiedLowBattery = true) }
+                            appendLog("低バッテリー通知発行完了 ($deviceName): $batteryLevel% <= $threshold%")
+                        } catch (notifyException: Exception) {
+                            appendLog("通知発行エラー: ${notifyException.message}")
+                            Log.e(TAG, "通知発行エラー", notifyException)
+                        }
+                    } else {
+                        appendLog("通知発行なし: 条件を満たしていません")
+                    }
+                    return@launch
+                }
+
+                // デバイス名から閾値を取得
+                val threshold = when {
+                    deviceName.contains("TR70", ignoreCase = true) -> actualSettings.tr70Threshold
+                    deviceName.contains("BSC200S", ignoreCase = true) -> actualSettings.bsc200sThreshold
+                    else -> SettingsDataStore.DEFAULT_TR70_THRESHOLD // デフォルト値
+                }
+
+                appendLog("通知設定: 有効=${actualSettings.lowBatteryNotificationEnabled}, 閾値=${threshold}%")
+
+                val existingInfo = deviceBatteryMap[address]
+                appendLog("通知フラグ: ${existingInfo?.notifiedLowBattery}")
+
+                // 通知条件チェック
+                val notificationEnabled = actualSettings.lowBatteryNotificationEnabled
+                val isLowBattery = batteryLevel <= threshold
+                val notNotifiedYet = existingInfo?.notifiedLowBattery != true
+
+                appendLog("通知条件チェック: 有効=$notificationEnabled, 低バッテリー=$isLowBattery (${batteryLevel}<=${threshold}), 未通知=$notNotifiedYet")
+
+                val shouldNotify = notificationEnabled && isLowBattery && notNotifiedYet
+
+                // バッテリーが回復した場合は通知済みフラグをリセット
+                if (batteryLevel > threshold && existingInfo?.notifiedLowBattery == true) {
+                    updateDeviceInfo(address) { it.copy(notifiedLowBattery = false) }
+                    appendLog("バッテリー回復 ($deviceName): $batteryLevel% -> フラグリセット")
+                }
+
+                // 通知発行
+                if (shouldNotify) {
+                    appendLog("通知発行条件を満たしました ($deviceName)")
+                    try {
+                        NotificationHelper.showLowBatteryNotification(
+                            repository.getContext(),
+                            deviceName,
+                            batteryLevel,
+                            threshold
+                        )
+                        updateDeviceInfo(address) { it.copy(notifiedLowBattery = true) }
+                        appendLog("低バッテリー通知発行完了 ($deviceName): $batteryLevel% <= $threshold%")
+                    } catch (notifyException: Exception) {
+                        appendLog("通知発行エラー: ${notifyException.message}")
+                        Log.e(TAG, "通知発行エラー", notifyException)
+                    }
+                } else {
+                    appendLog("通知発行なし: 条件を満たしていません")
+                }
+            } catch (e: Exception) {
+                appendLog("通知チェックエラー: ${e.message}")
+                Log.e(TAG, "通知チェックエラー: ${e.message}", e)
+            }
+        }
     }
 
     override fun onCleared() {

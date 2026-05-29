@@ -43,6 +43,8 @@ android {
     packaging {
         jniLibs {
             useLegacyPackaging = false
+            // 16KB page size alignment support
+            keepDebugSymbols += "**.so"
         }
     }
 }

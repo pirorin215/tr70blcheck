@@ -18,12 +18,28 @@
         android:gravity="center"
         android:layout_marginBottom="8dp" />
 
-    <Button
-        android:id="@+id/btn_rescan"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="🔄 再スキャン"
-        android:layout_marginBottom="8dp" />
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
+
+        <Button
+            android:id="@+id/btn_rescan"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="🔄 再スキャン"
+            android:layout_marginEnd="4dp" />
+
+        <Button
+            android:id="@+id/btn_settings"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="⚙️ 設定"
+            android:layout_marginStart="4dp" />
+    </LinearLayout>
 
     <TextView
         android:id="@+id/tv_status"
