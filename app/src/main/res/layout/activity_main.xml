@@ -12,7 +12,7 @@
         android:id="@+id/tv_title"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="TR70 バッテリーモニター"
+        android:text="バッテリーモニター"
         android:textSize="24sp"
         android:textStyle="bold"
         android:gravity="center"
@@ -22,44 +22,9 @@
         android:id="@+id/tv_status"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="状態: Disconnected"
+        android:text="状態: 起動中..."
         android:textSize="18sp"
         android:layout_marginBottom="16dp" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:layout_marginBottom="16dp">
-
-        <Button
-            android:id="@+id/btn_scan"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="スキャン開始"
-            android:layout_marginEnd="8dp"
-            android:drawableLeft="@drawable/ic_battery_scan" />
-
-        <Button
-            android:id="@+id/btn_connect"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="接続"
-            android:enabled="false"
-            android:layout_marginEnd="8dp"
-            android:drawableLeft="@drawable/ic_battery_connect" />
-
-        <Button
-            android:id="@+id/btn_disconnect"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="切断"
-            android:enabled="false"
-            android:drawableLeft="@drawable/ic_battery_disconnect" />
-    </LinearLayout>
 
     <TextView
         android:id="@+id/tv_device_info"
@@ -73,10 +38,21 @@
         android:id="@+id/tv_battery"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="バッテリー: --"
-        android:textSize="18sp"
+        android:text="デバイスリスト:"
+        android:textSize="16sp"
         android:textStyle="bold"
-        android:layout_marginBottom="16dp" />
+        android:layout_marginBottom="8dp" />
+
+    <TextView
+        android:id="@+id/tv_device_list"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="まだスキャンしていません"
+        android:textSize="14sp"
+        android:layout_marginBottom="8dp"
+        android:padding="8dp"
+        android:background="@android:color/white"
+        android:textColor="@android:color/black" />
 
     <TextView
         android:id="@+id/tv_services"

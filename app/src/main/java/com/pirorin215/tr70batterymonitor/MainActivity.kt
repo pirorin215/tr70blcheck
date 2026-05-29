@@ -5,13 +5,13 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
-import android.widget.Button
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import com.pirorin215.tr70batterymonitor.data.DeviceBatteryInfo
 import com.pirorin215.tr70batterymonitor.service.BleScanService
 import com.pirorin215.tr70batterymonitor.service.BleScanServiceManager
 import com.pirorin215.tr70batterymonitor.viewmodel.MainViewModel
@@ -21,13 +21,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var viewModel: MainViewModel
 
-    private lateinit var btnScan: Button
-    private lateinit var btnConnect: Button
-    private lateinit var btnDisconnect: Button
     private lateinit var tvStatus: TextView
     private lateinit var tvDeviceInfo: TextView
     private lateinit var tvServices: TextView
     private lateinit var tvBattery: TextView
+    private lateinit var tvDeviceList: TextView
     private lateinit var tvLogs: TextView
 
     private val requestPermissionLauncher = registerForActivityResult(
@@ -37,6 +35,7 @@ class MainActivity : AppCompatActivity() {
         if (allGranted) {
             viewModel.onPermissionsGranted()
             startBleScanService()
+            viewModel.startScan() // 自動スキャン開始
         }
     }
 
@@ -50,26 +49,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initViews() {
-        btnScan = findViewById(R.id.btn_scan)
-        btnConnect = findViewById(R.id.btn_connect)
-        btnDisconnect = findViewById(R.id.btn_disconnect)
         tvStatus = findViewById(R.id.tv_status)
         tvDeviceInfo = findViewById(R.id.tv_device_info)
         tvServices = findViewById(R.id.tv_services)
         tvBattery = findViewById(R.id.tv_battery)
+        tvDeviceList = findViewById(R.id.tv_device_list)
         tvLogs = findViewById(R.id.tv_logs)
-
-        btnScan.setOnClickListener {
-            viewModel.startScan()
-        }
-
-        btnConnect.setOnClickListener {
-            viewModel.connectToDevice()
-        }
-
-        btnDisconnect.setOnClickListener {
-            viewModel.disconnect()
-        }
     }
 
     private fun setupViewModel() {
@@ -111,32 +96,29 @@ class MainActivity : AppCompatActivity() {
                 viewModel.onDeviceFound(device)
             }
         }
+
+        lifecycleScope.launch {
+            viewModel.deviceList.collect { devices ->
+                updateDeviceList(devices)
+            }
+        }
+    }
+
+    private fun updateDeviceList(devices: List<DeviceBatteryInfo>) {
+        if (devices.isEmpty()) {
+            tvDeviceList.text = "まだスキャンしていません"
+        } else {
+            val sb = StringBuilder()
+            devices.forEach { device ->
+                sb.append("${device.deviceName}: ${device.getBatteryDisplay()}\n")
+            }
+            tvDeviceList.text = sb.toString()
+        }
     }
 
     private fun updateStatusUI(state: String) {
         tvStatus.text = "状態: $state"
-        when (state) {
-            "Disconnected" -> {
-                btnScan.isEnabled = true
-                btnConnect.isEnabled = false
-                btnDisconnect.isEnabled = false
-            }
-            "Scanning" -> {
-                btnScan.isEnabled = false
-                btnConnect.isEnabled = false
-                btnDisconnect.isEnabled = false
-            }
-            "Device Found" -> {
-                btnScan.isEnabled = false
-                btnConnect.isEnabled = true
-                btnDisconnect.isEnabled = false
-            }
-            "Connected" -> {
-                btnScan.isEnabled = false
-                btnConnect.isEnabled = false
-                btnDisconnect.isEnabled = true
-            }
-        }
+        // ボタン制御は不要（自動監視）
     }
 
     private fun checkPermissions() {
@@ -165,6 +147,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             viewModel.onPermissionsGranted()
             startBleScanService()
+            viewModel.startScan() // 自動スキャン開始
         }
     }
 

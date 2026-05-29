@@ -22,6 +22,7 @@ import com.pirorin215.tr70batterymonitor.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class BleScanService : Service() {
@@ -30,6 +31,7 @@ class BleScanService : Service() {
         const val TAG = "BleScanService"
         const val CHANNEL_ID = "BleScanServiceChannel"
         const val NOTIFICATION_ID = 1
+        private const val SCAN_TIMEOUT_MS = 30000L // 30秒のスキャンタイトアウト
     }
 
     private lateinit var bluetoothManager: BluetoothManager
@@ -112,6 +114,13 @@ class BleScanService : Service() {
                 scanSettings,
                 bleScanCallback
             )
+
+            // スキャンタイトアウトを設定
+            scanJob = CoroutineScope(Dispatchers.IO).launch {
+                delay(SCAN_TIMEOUT_MS)
+                Log.d(TAG, "Scan timeout reached. Stopping scan.")
+                stopBleScan()
+            }
         } catch (e: SecurityException) {
             Log.e(TAG, "Security exception: ${e.message}")
         } catch (e: IllegalArgumentException) {
@@ -135,9 +144,10 @@ class BleScanService : Service() {
             val deviceName = result.device.name ?: "(no name)"
             Log.d(TAG, "Found device: $deviceName (${result.device.address}), RSSI: ${result.rssi}")
 
-            // TR70らしいデバイスを探す（まずは全デバイスを通知）
-            // "Varia", "Garmin", "Radar"などを含むデバイスを対象
-            if (deviceName.contains("Varia", ignoreCase = true) ||
+            // TR70、BSC200Sなどのバッテリーデバイスを探す
+            // 該当デバイス名を含むデバイスを対象
+            if (deviceName.contains("BSC200S", ignoreCase = true) ||
+                deviceName.contains("Varia", ignoreCase = true) ||
                 deviceName.contains("Garmin", ignoreCase = true) ||
                 deviceName.contains("Radar", ignoreCase = true) ||
                 deviceName.contains("TR70", ignoreCase = true) ||
@@ -145,8 +155,7 @@ class BleScanService : Service() {
                 deviceName.contains("RTR510", ignoreCase = true)) {
 
                 Log.d(TAG, "Target device found: $deviceName")
-                stopBleScan()
-
+                // スキャンを継続して複数デバイスを見つける
                 CoroutineScope(Dispatchers.IO).launch {
                     BleScanServiceManager.emitDeviceFound(result.device)
                 }
