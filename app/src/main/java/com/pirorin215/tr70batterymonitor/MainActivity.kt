@@ -148,7 +148,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val tvStatusBadge = TextView(this).apply {
-            text = device.getStatusDisplay()
+            text = device.getUnifiedStatusDisplay()
             textSize = 12f
             setPadding(dpToPx(8), dpToPx(4), dpToPx(8), dpToPx(4))
             setTextColor(getStatusTextColor(device.status))
@@ -162,7 +162,7 @@ class MainActivity : AppCompatActivity() {
         row1.addView(tvName)
         row1.addView(tvStatusBadge)
 
-        // 2行目: バッテリー + RSSI
+        // 2行目: バッテリーのみ（RSSIはステータスに統合）
         val row2 = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -196,29 +196,7 @@ class MainActivity : AppCompatActivity() {
         batteryContainer.addView(tvBatteryLabel)
         batteryContainer.addView(tvBatteryValue)
 
-        // RSSI
-        val rssiContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-        }
-
-        val tvRssiLabel = TextView(this).apply {
-            text = "📶 "
-            textSize = 16f
-        }
-
-        val tvRssiValue = TextView(this).apply {
-            text = device.getRssiDisplay()
-            textSize = 16f
-            setTextColor(Color.parseColor("#757575"))
-        }
-
-        rssiContainer.addView(tvRssiLabel)
-        rssiContainer.addView(tvRssiValue)
-
         row2.addView(batteryContainer)
-        row2.addView(rssiContainer)
 
         // 3行目: アドレス
         val tvAddress = TextView(this).apply {

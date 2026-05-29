@@ -110,7 +110,10 @@ class MainViewModel : ViewModel() {
             is BleEvent.Disconnected -> {
                 appendLog("切断検知 (${event.address})")
                 cancelDeviceTimeout(event.address)
-                updateDeviceInfo(event.address) { it.copy(status = DeviceStatus.DISCONNECTED) }
+                // 切断時にRSSIをクリア
+                updateDeviceInfo(event.address) {
+                    it.copy(status = DeviceStatus.DISCONNECTED, rssi = null)
+                }
             }
             is BleEvent.RssiUpdated -> {
                 updateDeviceInfo(event.address) { it.copy(rssi = event.rssi) }

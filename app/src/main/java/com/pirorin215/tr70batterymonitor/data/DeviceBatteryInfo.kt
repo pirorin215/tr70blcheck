@@ -23,6 +23,10 @@ data class DeviceBatteryInfo(
     }
 
     fun getRssiDisplay(): String {
+        // 切断時はRSSIを表示しない
+        if (status == DeviceStatus.DISCONNECTED || status == DeviceStatus.ERROR) {
+            return "--"
+        }
         return if (rssi != null) {
             "${rssi}dBm"
         } else {
@@ -40,6 +44,29 @@ data class DeviceBatteryInfo(
             DeviceStatus.COMPLETED -> "取得済み"
             DeviceStatus.DISCONNECTED -> "切断"
             DeviceStatus.ERROR -> "エラー"
+        }
+    }
+
+    /**
+     * RSSIと接続状態を統合した表示
+     * 接続中: "接続中 (-60dBm)"
+     * 切断: "切断"
+     */
+    fun getUnifiedStatusDisplay(): String {
+        return when (status) {
+            DeviceStatus.DISCONNECTED, DeviceStatus.ERROR -> "切断"
+            DeviceStatus.SCANNING -> "スキャン中"
+            DeviceStatus.FOUND -> "発見"
+            DeviceStatus.CONNECTING -> "接続中"
+            DeviceStatus.READING -> "読取中"
+            else -> {
+                // 接続完了状態でRSSIがある場合は統合表示
+                if (rssi != null) {
+                    "接続中 (${rssi}dBm)"
+                } else {
+                    "接続中"
+                }
+            }
         }
     }
 }
