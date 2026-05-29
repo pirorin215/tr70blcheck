@@ -178,7 +178,7 @@ class MainActivity : AppCompatActivity() {
         val batteryContainer = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
 
         val tvBatteryLabel = TextView(this).apply {
@@ -186,14 +186,37 @@ class MainActivity : AppCompatActivity() {
             textSize = 16f
         }
 
+        // プログレスバー（バッテリーレベル表示）
+        val progressBar = android.widget.ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            layoutParams = LinearLayout.LayoutParams(0, dpToPx(16), 1f)
+            max = 100
+            progress = device.batteryLevel ?: 0
+
+            // 色設定
+            val batteryColor = when {
+                device.batteryLevel == null -> Color.parseColor("#9E9E9E")
+                device.batteryLevel > 50 -> Color.parseColor("#4CAF50")
+                device.batteryLevel > 20 -> Color.parseColor("#FF9800")
+                else -> Color.parseColor("#F44336")
+            }
+            progressTintList = android.content.res.ColorStateList.valueOf(batteryColor)
+        }
+
         val tvBatteryValue = TextView(this).apply {
             text = device.getBatteryDisplay()
-            textSize = 20f
+            textSize = 16f
             setTypeface(null, android.graphics.Typeface.BOLD)
             setTextColor(getBatteryColor(device.batteryLevel))
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(dpToPx(8), 0, 0, 0)
+            }
         }
 
         batteryContainer.addView(tvBatteryLabel)
+        batteryContainer.addView(progressBar)
         batteryContainer.addView(tvBatteryValue)
 
         row2.addView(batteryContainer)
